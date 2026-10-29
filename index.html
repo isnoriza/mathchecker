@@ -1,0 +1,994 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Math Solution Checker</title>
+    
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: { sans: ['Inter', 'sans-serif'] },
+                    colors: {
+                        primary: { 50: '#eff6ff', 100: '#dbeafe', 500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8' }
+                    }
+                }
+            }
+        }
+    </script>
+ 
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+ 
+    <!-- Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+ 
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f8fafc; color: #0f172a; }
+        .loader { border: 3px solid #f3f3f3; border-radius: 50%; border-top: 3px solid #3b82f6; width: 24px; height: 24px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #f1f1f1; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+ 
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, getDocs, updateDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+ 
+        window.firebaseModules = { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore, doc, setDoc, onSnapshot, collection, getDocs, updateDoc };
+        window.dispatchEvent(new Event('firebase-ready'));
+    </script>
+ 
+    <script type="text/babel" data-type="module">
+        const { useState, useEffect, useRef, useMemo } = React;
+ 
+        // --- Firebase Setup & Globals ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'ai-math-marker-default';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' && __firebase_config !== '{}' 
+            ? JSON.parse(__firebase_config) 
+            : null;
+        
+        let db = null;
+        let auth = null;
+ 
+        // In-memory local fallback store in case Firebase is unconfigured/blocked
+        let localSubmissions = [];
+        let localAssessments = [
+            {
+                id: 'default-1',
+                name: 'Midterm Calculus - Q1',
+                topic: 'Integration by Parts',
+                maxMarks: 10,
+                schemeText: 'Step 1: Identify u and dv (2m)\nStep 2: Apply integration formula (4m)\nStep 3: Correct final answer (4m)',
+                createdAt: Date.now()
+            }
+        ];
+ 
+        // --- Utilities ---
+        const generateId = () => Math.random().toString(36).substr(2, 9);
+        
+        const fileToBase64 = (file) => new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = () => {
+                let base64String = reader.result;
+                const base64Data = base64String.split(',')[1];
+                const mimeType = base64String.split(';')[0].split(':')[1];
+                resolve({ data: base64Data, mimeType });
+            };
+            reader.onerror = error => reject(error);
+        });
+ 
+        // --- AI Integration ---
+        const evaluateSolution = async (studentImage, assessment) => {
+            const apiKey = ""; 
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+ 
+            const parts = [
+                { 
+                    text: `You are an expert Mathematics grader. 
+                    Evaluate the student's handwritten solution against the provided marking scheme.
+                    
+                    Assessment: ${assessment.name}
+                    Topic: ${assessment.topic}
+                    Max Marks: ${assessment.maxMarks}
+                    Marking Scheme details: ${assessment.schemeText || 'Refer to the attached marking scheme image.'}
+                    
+                    Rules:
+                    1. Read the student's handwritten solution carefully.
+                    2. Compare the steps with the marking scheme.
+                    3. Award marks for correct steps and valid partial working. Accept mathematically equivalent methods.
+                    4. CRITICAL MARKING SCHEME RULE: Apply strict Method (K) and Answer (J) mark logic. If a student gets K0 (0 marks for method / working step), they MUST automatically get J0 (0 marks for final answer or follow-through step depending on that method). Never award answer or follow-through marks if the prerequisite method step failed or is incorrect (K0 => J0).
+                    5. Identify calculation errors or incorrect methods.
+                    6. DO NOT invent marks or award more than the maximum.
+                    7. Generate brief, constructive feedback explaining mistakes and corrections.
+                    8. If the student's handwriting is completely unreadable, or if the marking is highly ambiguous, set "needsReview" to true.
+                    
+                    Return a JSON object STRICTLY matching this schema:
+                    {
+                        "marksAwarded": <number>,
+                        "feedback": "<string>",
+                        "needsReview": <boolean>,
+                        "stepBreakdown": [
+                            {
+                                "step": "<string describing the student's step>",
+                                "marks": <number marks awarded for this specific step>,
+                                "comments": "<string specific feedback or correction for this step>"
+                            }
+                        ]
+                    }`
+                },
+                { inlineData: studentImage } // Student's solution
+            ];
+ 
+            // If the lecturer uploaded an image for the marking scheme, include it
+            if (assessment.schemeImage) {
+                parts.push({ text: "Here is the official marking scheme image for reference:" });
+                parts.push({ inlineData: assessment.schemeImage });
+            }
+ 
+            const payload = {
+                contents: [{ role: 'user', parts: parts }],
+                generationConfig: { responseMimeType: "application/json" }
+            };
+ 
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+ 
+            if (!response.ok) throw new Error("Failed to process image with AI");
+            
+            const result = await response.json();
+            const textContent = result.candidates?.[0]?.content?.parts?.[0]?.text;
+            
+            if (!textContent) throw new Error("Invalid AI response format");
+            
+            try {
+                const jsonStr = textContent.replace(/```json/g, '').replace(/```/g, '').trim();
+                return JSON.parse(jsonStr);
+            } catch (e) {
+                console.error("Failed to parse AI JSON response", textContent);
+                throw new Error("AI returned malformed JSON");
+            }
+        };
+ 
+        // --- Main Application Component ---
+        const App = () => {
+            const [isInitialized, setIsInitialized] = useState(false);
+            const [role, setRole] = useState(null); // 'lecturer' | 'student'
+            const [assessments, setAssessments] = useState([]);
+            const [submissions, setSubmissions] = useState([]);
+            const [globalError, setGlobalError] = useState("");
+            const [showPassModal, setShowPassModal] = useState(false);
+            const [passwordInput, setPasswordInput] = useState("");
+            const [passError, setPassError] = useState("");
+ 
+            useEffect(() => {
+                const initSystem = async () => {
+                    try {
+                        if (firebaseConfig && window.firebaseModules) {
+                            const { initializeApp, getAuth, signInAnonymously, signInWithCustomToken, getFirestore, collection, onSnapshot } = window.firebaseModules;
+                            const app = initializeApp(firebaseConfig);
+                            auth = getAuth(app);
+                            db = getFirestore(app);
+ 
+                            const token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                            if (token) {
+                                await signInWithCustomToken(auth, token);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+ 
+                            // Listen to Assessments
+                            const assessmentsRef = collection(db, 'artifacts', appId, 'public', 'data', 'assessments');
+                            onSnapshot(assessmentsRef, (snapshot) => {
+                                const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                                setAssessments(data.length > 0 ? data : localAssessments);
+                            }, (err) => {
+                                console.warn("Assessments snapshot failed, using local mode:", err);
+                                setAssessments(localAssessments);
+                            });
+ 
+                            // Listen to Submissions
+                            const submissionsRef = collection(db, 'artifacts', appId, 'public', 'data', 'submissions');
+                            onSnapshot(submissionsRef, (snapshot) => {
+                                const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                                data.sort((a, b) => b.timestamp - a.timestamp);
+                                setSubmissions(data);
+                            }, (err) => {
+                                console.warn("Submissions snapshot failed, using local mode:", err);
+                                setSubmissions(localSubmissions);
+                            });
+                        } else {
+                            console.log("Firebase config not available. Running in local session mode.");
+                            setAssessments(localAssessments);
+                            setSubmissions(localSubmissions);
+                        }
+                    } catch (error) {
+                        console.warn("Firebase init error, switching to offline fallback mode:", error);
+                        setAssessments(localAssessments);
+                        setSubmissions(localSubmissions);
+                    } finally {
+                        setIsInitialized(true);
+                    }
+                };
+ 
+                if (window.firebaseModules) {
+                    initSystem();
+                } else {
+                    window.addEventListener('firebase-ready', initSystem);
+                    const timer = setTimeout(() => {
+                        if (!isInitialized) initSystem();
+                    }, 1500);
+                    return () => clearTimeout(timer);
+                }
+            }, []);
+ 
+            if (globalError) return <div className="p-8 text-center text-red-600">{globalError}</div>;
+            if (!isInitialized) return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="loader"></div></div>;
+ 
+            if (!role) {
+                return (
+                    <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-6">
+                        <div className="max-w-md w-full bg-white rounded-2xl shadow-xl overflow-hidden p-8 text-center">
+                            <div className="w-16 h-16 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mx-auto mb-6 text-2xl">
+                                <i className="fa-solid fa-square-root-variable"></i>
+                            </div>
+                            <h1 className="text-3xl font-bold text-gray-900 mb-2">MathMarker AI</h1>
+                            <p className="text-gray-500 mb-8">Select your portal to continue</p>
+                            
+                            <div className="space-y-4">
+                                <button 
+                                    onClick={() => setRole('student')}
+                                    className="w-full group relative flex items-center justify-center py-3 px-4 border border-transparent text-sm font-medium rounded-lg text-white bg-slate-800 hover:bg-slate-700 transition-colors"
+                                >
+                                    <i className="fa-solid fa-user-graduate mr-2"></i> Student Portal
+                                </button>
+                                <button 
+                                    onClick={() => {
+                                        setPassError("");
+                                        setPasswordInput("");
+                                        setShowPassModal(true);
+                                    }}
+                                    className="w-full group relative flex items-center justify-center py-3 px-4 border border-transparent text-sm font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 transition-colors"
+                                >
+                                    <i className="fa-solid fa-chalkboard-user mr-2"></i> Lecturer Dashboard
+                                </button>
+                            </div>
+                        </div>
+ 
+                        {/* Lecturer Verification Modal */}
+                        {showPassModal && (
+                            <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                                <div className="bg-white rounded-2xl p-6 w-full max-w-sm shadow-xl text-left">
+                                    <h3 className="text-lg font-bold text-gray-900 mb-1">Lecturer Verification</h3>
+                                    <p className="text-xs text-gray-500 mb-4">Enter password to access dashboard (Default: <code className="bg-gray-100 px-1.5 py-0.5 rounded text-blue-600 font-bold">admin</code>)</p>
+                                    <form onSubmit={(e) => {
+                                        e.preventDefault();
+                                        if (passwordInput === 'admin') {
+                                            setShowPassModal(false);
+                                            setRole('lecturer');
+                                        } else {
+                                            setPassError("Invalid password. Please try again.");
+                                        }
+                                    }}>
+                                        <input 
+                                            type="password" 
+                                            autoFocus
+                                            value={passwordInput} 
+                                            onChange={(e) => setPasswordInput(e.target.value)}
+                                            placeholder="Enter password..." 
+                                            className="w-full px-4 py-2 border border-gray-300 rounded-lg text-sm mb-3 outline-none focus:ring-2 focus:ring-blue-500"
+                                        />
+                                        {passError && <p className="text-xs text-red-500 mb-3">{passError}</p>}
+                                        <div className="flex justify-end gap-2">
+                                            <button 
+                                                type="button" 
+                                                onClick={() => setShowPassModal(false)}
+                                                className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+                                            >
+                                                Cancel
+                                            </button>
+                                            <button 
+                                                type="submit" 
+                                                className="px-4 py-2 text-sm text-white bg-blue-600 hover:bg-blue-700 rounded-lg font-medium transition-colors"
+                                            >
+                                                Enter Dashboard
+                                            </button>
+                                        </div>
+                                    </form>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                );
+            }
+ 
+            return (
+                <div className="min-h-screen bg-gray-50 text-slate-800">
+                    <nav className="bg-white border-b border-gray-200 px-6 py-4 flex justify-between items-center sticky top-0 z-10">
+                        <div className="flex items-center gap-2 text-xl font-bold text-slate-800">
+                            <i className="fa-solid fa-square-root-variable text-blue-600"></i> MathMarker AI
+                        </div>
+                        <button 
+                            onClick={() => setRole(null)}
+                            className="text-sm font-medium text-gray-500 hover:text-gray-900 transition-colors"
+                        >
+                            Switch Role <i className="fa-solid fa-right-from-bracket ml-1"></i>
+                        </button>
+                    </nav>
+ 
+                    <main className="max-w-7xl mx-auto p-6">
+                        {role === 'lecturer' ? (
+                            <LecturerView assessments={assessments} submissions={submissions} db={db} />
+                        ) : (
+                            <StudentView assessments={assessments} db={db} />
+                        )}
+                    </main>
+                </div>
+            );
+        };
+ 
+        // --- Student View ---
+        const StudentView = ({ assessments, db }) => {
+            const [step, setStep] = useState(1);
+            const [formData, setFormData] = useState({ name: '', class: '', assessmentId: '' });
+            const [imageFile, setImageFile] = useState(null);
+            const [imagePreview, setImagePreview] = useState(null);
+            const [isSubmitting, setIsSubmitting] = useState(false);
+            const [error, setError] = useState("");
+            const [resultInfo, setResultInfo] = useState(null);
+ 
+            const handleImageChange = (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    setImageFile(file);
+                    const reader = new FileReader();
+                    reader.onloadend = () => setImagePreview(reader.result);
+                    reader.readAsDataURL(file);
+                }
+            };
+ 
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                setError("");
+                setIsSubmitting(true);
+ 
+                try {
+                    const assessment = assessments.find(a => a.id === formData.assessmentId);
+                    if (!assessment) throw new Error("Assessment not found");
+ 
+                    const base64Img = await fileToBase64(imageFile);
+                    
+                    const aiResult = await evaluateSolution(base64Img, assessment);
+                    
+                    const submissionId = generateId();
+                    const submissionData = {
+                        id: submissionId,
+                        studentName: formData.name,
+                        studentClass: formData.class,
+                        assessmentId: assessment.id,
+                        assessmentName: assessment.name,
+                        topic: assessment.topic,
+                        marksAwarded: aiResult.marksAwarded > assessment.maxMarks ? assessment.maxMarks : aiResult.marksAwarded,
+                        maxMarks: assessment.maxMarks,
+                        percentage: Math.round((aiResult.marksAwarded / assessment.maxMarks) * 100),
+                        feedback: aiResult.feedback,
+                        stepBreakdown: aiResult.stepBreakdown || [],
+                        status: aiResult.needsReview ? 'Pending Lecturer Review' : 'AI Marked',
+                        imageUrl: imagePreview,
+                        timestamp: Date.now()
+                    };
+ 
+                    if (db && window.firebaseModules) {
+                        const { doc, setDoc } = window.firebaseModules;
+                        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'submissions', submissionId);
+                        await setDoc(docRef, submissionData);
+                    } else {
+                        localSubmissions.unshift(submissionData);
+                    }
+ 
+                    setResultInfo(submissionData);
+                    setStep(3);
+                } catch (err) {
+                    console.error(err);
+                    setError(err.message || "Failed to process submission. Please try again.");
+                } finally {
+                    setIsSubmitting(false);
+                }
+            };
+ 
+            const resetForm = () => {
+                setStep(1);
+                setImageFile(null);
+                setImagePreview(null);
+                setResultInfo(null);
+                setFormData({ ...formData, assessmentId: '' });
+            };
+ 
+            return (
+                <div className="max-w-2xl mx-auto">
+                    <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+                        <div className="px-6 py-5 border-b border-gray-100 bg-gray-50 flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600">
+                                <i className="fa-solid fa-upload"></i>
+                            </div>
+                            <h2 className="text-lg font-semibold text-slate-800">Submit Solution</h2>
+                        </div>
+ 
+                        <div className="p-6">
+                            {step === 1 && (
+                                <form onSubmit={(e) => { e.preventDefault(); setStep(2); }} className="space-y-4">
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
+                                        <input 
+                                            required type="text" 
+                                            value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})}
+                                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                                            placeholder="e.g. John Doe"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">Class</label>
+                                        <input 
+                                            required type="text" 
+                                            value={formData.class} onChange={e => setFormData({...formData, class: e.target.value})}
+                                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none"
+                                            placeholder="e.g. 5 Science A"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">Select Assessment</label>
+                                        <select 
+                                            required
+                                            value={formData.assessmentId} onChange={e => setFormData({...formData, assessmentId: e.target.value})}
+                                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none bg-white"
+                                        >
+                                            <option value="" disabled>-- Select Assessment --</option>
+                                            {assessments.map(a => (
+                                                <option key={a.id} value={a.id}>{a.name} ({a.topic}) - Max {a.maxMarks}m</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    
+                                    <div className="pt-4 flex justify-end">
+                                        <button type="submit" disabled={!formData.assessmentId} className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors">
+                                            Next Step <i className="fa-solid fa-arrow-right ml-1"></i>
+                                        </button>
+                                    </div>
+                                </form>
+                            )}
+ 
+                            {step === 2 && (
+                                <form onSubmit={handleSubmit} className="space-y-6">
+                                    <div className="bg-blue-50 p-4 rounded-lg flex items-start gap-3">
+                                        <i className="fa-solid fa-circle-info text-blue-500 mt-1"></i>
+                                        <div>
+                                            <p className="text-sm font-medium text-blue-900">Uploading for: {assessments.find(a=>a.id===formData.assessmentId)?.name}</p>
+                                            <p className="text-xs text-blue-700 mt-1">Please ensure your handwritten solution is clear, well-lit, and legible.</p>
+                                        </div>
+                                    </div>
+ 
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-2">Upload Handwritten Solution</label>
+                                        <div className="mt-1 flex justify-center px-6 pt-5 pb-6 border-2 border-gray-300 border-dashed rounded-xl hover:bg-gray-50 transition-colors cursor-pointer" onClick={() => document.getElementById('file-upload').click()}>
+                                            <div className="space-y-1 text-center">
+                                                {imagePreview ? (
+                                                    <img src={imagePreview} alt="Preview" className="mx-auto h-48 object-contain rounded" />
+                                                ) : (
+                                                    <i className="fa-solid fa-image text-gray-400 text-4xl mb-3"></i>
+                                                )}
+                                                <div className="flex text-sm text-gray-600 justify-center">
+                                                    <span className="relative rounded-md font-medium text-blue-600 hover:text-blue-500 focus-within:outline-none">
+                                                        <span>Upload a file</span>
+                                                        <input id="file-upload" name="file-upload" type="file" className="sr-only" accept="image/*" onChange={handleImageChange} required={!imageFile} />
+                                                    </span>
+                                                    <p className="pl-1">or drag and drop</p>
+                                                </div>
+                                                <p className="text-xs text-gray-500">PNG, JPG up to 10MB</p>
+                                            </div>
+                                        </div>
+                                    </div>
+ 
+                                    {error && <div className="text-red-500 text-sm p-3 bg-red-50 rounded-lg"><i className="fa-solid fa-triangle-exclamation mr-2"></i>{error}</div>}
+ 
+                                    <div className="pt-4 flex justify-between">
+                                        <button type="button" onClick={() => setStep(1)} className="px-6 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors" disabled={isSubmitting}>
+                                            Back
+                                        </button>
+                                        <button type="submit" disabled={!imageFile || isSubmitting} className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors flex items-center gap-2">
+                                            {isSubmitting ? <><div className="loader w-4 h-4 border-2 border-white border-top-transparent"></div> Processing AI...</> : 'Submit Solution'}
+                                        </button>
+                                    </div>
+                                </form>
+                            )}
+ 
+                            {step === 3 && resultInfo && (
+                                <div className="text-center space-y-6 py-4">
+                                    <div className="w-16 h-16 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto text-3xl">
+                                        <i className="fa-solid fa-check"></i>
+                                    </div>
+                                    <div>
+                                        <h3 className="text-2xl font-bold text-gray-900">Submission Successful!</h3>
+                                        <p className="text-gray-500 mt-1">Your solution has been graded by AI.</p>
+                                    </div>
+                                    
+                                    <div className="bg-gray-50 rounded-xl p-6 text-left border border-gray-100">
+                                        <div className="grid grid-cols-2 gap-4 mb-4">
+                                            <div>
+                                                <p className="text-xs text-gray-500 uppercase font-semibold">Marks Obtained</p>
+                                                <p className="text-3xl font-bold text-blue-600">{resultInfo.marksAwarded} <span className="text-lg text-gray-400">/ {resultInfo.maxMarks}</span></p>
+                                            </div>
+                                            <div>
+                                                <p className="text-xs text-gray-500 uppercase font-semibold">Percentage</p>
+                                                <p className="text-3xl font-bold text-slate-700">{resultInfo.percentage}%</p>
+                                            </div>
+                                        </div>
+                                        <div className="mb-4">
+                                            <p className="text-xs text-gray-500 uppercase font-semibold mb-1">Status</p>
+                                            <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${resultInfo.status === 'AI Marked' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
+                                                {resultInfo.status}
+                                            </span>
+                                        </div>
+                                        <div>
+                                            <p className="text-xs text-gray-500 uppercase font-semibold mb-2">AI Feedback</p>
+                                            <p className="text-sm text-gray-700 bg-white p-3 rounded-lg border border-gray-200">{resultInfo.feedback}</p>
+                                        </div>
+                                    </div>
+ 
+                                    <button onClick={resetForm} className="px-6 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-700 transition-colors w-full">
+                                        Submit Another Solution
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+ 
+        // --- Lecturer View ---
+        const LecturerView = ({ assessments, submissions, db }) => {
+            const [activeTab, setActiveTab] = useState('dashboard');
+            const [selectedSubmission, setSelectedSubmission] = useState(null);
+ 
+            const [filterAssessment, setFilterAssessment] = useState('');
+            const [filterClass, setFilterClass] = useState('');
+            const [searchQuery, setSearchQuery] = useState('');
+            const [sortOrder, setSortOrder] = useState('desc');
+ 
+            const uniqueClasses = useMemo(() => [...new Set(submissions.map(s => s.studentClass))], [submissions]);
+ 
+            const filteredSubmissions = useMemo(() => {
+                let res = [...submissions];
+                if (filterAssessment) res = res.filter(s => s.assessmentId === filterAssessment);
+                if (filterClass) res = res.filter(s => s.studentClass === filterClass);
+                if (searchQuery) res = res.filter(s => s.studentName.toLowerCase().includes(searchQuery.toLowerCase()));
+ 
+                res.sort((a, b) => sortOrder === 'desc' ? b.percentage - a.percentage : a.percentage - b.percentage);
+                return res;
+            }, [submissions, filterAssessment, filterClass, searchQuery, sortOrder]);
+ 
+            const stats = useMemo(() => {
+                const totalSubs = filteredSubmissions.length;
+                const uniqueStudents = new Set(filteredSubmissions.map(s => `${s.studentName}-${s.studentClass}`)).size;
+                const aiMarked = filteredSubmissions.filter(s => s.status === 'AI Marked').length;
+                const pendingReview = filteredSubmissions.filter(s => s.status === 'Pending Lecturer Review').length;
+                const verified = filteredSubmissions.filter(s => s.status === 'Lecturer Verified').length;
+                
+                const avgPercent = totalSubs > 0 
+                    ? Math.round(filteredSubmissions.reduce((acc, s) => acc + (s.percentage || 0), 0) / totalSubs)
+                    : 0;
+                
+                const highestMark = totalSubs > 0 ? Math.max(...filteredSubmissions.map(s => s.percentage || 0)) : 0;
+                const lowestMark = totalSubs > 0 ? Math.min(...filteredSubmissions.map(s => s.percentage || 0)) : 0;
+ 
+                return { totalSubs, uniqueStudents, aiMarked, pendingReview, verified, avgPercent, highestMark, lowestMark };
+            }, [filteredSubmissions]);
+ 
+            return (
+                <div className="space-y-6">
+                    <div className="flex border-b border-gray-200">
+                        <button 
+                            className={`px-6 py-3 font-medium text-sm transition-colors ${activeTab === 'dashboard' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500 hover:text-gray-700'}`}
+                            onClick={() => setActiveTab('dashboard')}
+                        >
+                            <i className="fa-solid fa-chart-line mr-2"></i> Dashboard
+                        </button>
+                        <button 
+                            className={`px-6 py-3 font-medium text-sm transition-colors ${activeTab === 'add_assessment' ? 'border-b-2 border-blue-600 text-blue-600' : 'text-gray-500 hover:text-gray-700'}`}
+                            onClick={() => setActiveTab('add_assessment')}
+                        >
+                            <i className="fa-solid fa-file-circle-plus mr-2"></i> Add Marking Scheme
+                        </button>
+                    </div>
+ 
+                    {activeTab === 'add_assessment' && (
+                        <AddAssessmentForm db={db} onSuccess={() => setActiveTab('dashboard')} />
+                    )}
+ 
+                    {activeTab === 'dashboard' && (
+                        <div className="space-y-6">
+                            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+                                <StatCard icon="fa-users" title="Students" value={stats.uniqueStudents} color="text-blue-600" bg="bg-blue-50" />
+                                <StatCard icon="fa-file-lines" title="Submissions" value={stats.totalSubs} color="text-indigo-600" bg="bg-indigo-50" />
+                                <StatCard icon="fa-magnifying-glass-chart" title="Pending" value={stats.pendingReview} color="text-yellow-600" bg="bg-yellow-50" />
+                                <StatCard icon="fa-percent" title="Average" value={`${stats.avgPercent}%`} color="text-green-600" bg="bg-green-50" />
+                                <StatCard icon="fa-arrow-up" title="Highest" value={`${stats.highestMark}%`} color="text-emerald-600" bg="bg-emerald-50" />
+                                <StatCard icon="fa-arrow-down" title="Lowest" value={`${stats.lowestMark}%`} color="text-rose-600" bg="bg-rose-50" />
+                            </div>
+ 
+                            <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex flex-wrap gap-4 items-center">
+                                <div className="flex-1 min-w-[200px]">
+                                    <input 
+                                        type="text" placeholder="Search student name..." 
+                                        value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
+                                        className="w-full px-4 py-2 border border-gray-300 rounded-lg text-sm outline-none focus:border-blue-500"
+                                    />
+                                </div>
+                                <select 
+                                    value={filterAssessment} onChange={e => setFilterAssessment(e.target.value)}
+                                    className="px-4 py-2 border border-gray-300 rounded-lg text-sm outline-none bg-white"
+                                >
+                                    <option value="">All Assessments</option>
+                                    {assessments.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                                </select>
+                                <select 
+                                    value={filterClass} onChange={e => setFilterClass(e.target.value)}
+                                    className="px-4 py-2 border border-gray-300 rounded-lg text-sm outline-none bg-white"
+                                >
+                                    <option value="">All Classes</option>
+                                    {uniqueClasses.map(c => <option key={c} value={c}>{c}</option>)}
+                                </select>
+                                <select 
+                                    value={sortOrder} onChange={e => setSortOrder(e.target.value)}
+                                    className="px-4 py-2 border border-gray-300 rounded-lg text-sm outline-none bg-white"
+                                >
+                                    <option value="desc">Marks: Highest to Lowest</option>
+                                    <option value="asc">Marks: Lowest to Highest</option>
+                                </select>
+                            </div>
+ 
+                            <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+                                <div className="px-6 py-4 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+                                    <h3 className="font-semibold text-slate-800">Student Results</h3>
+                                    <div className="text-xs text-gray-500 flex items-center"><span className="w-2 h-2 rounded-full bg-green-500 mr-2 animate-pulse"></span> Live Updates Active</div>
+                                </div>
+                                
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-left text-sm text-gray-600">
+                                        <thead className="bg-gray-50 text-gray-700 font-medium border-b border-gray-200">
+                                            <tr>
+                                                <th className="px-6 py-3">Student</th>
+                                                <th className="px-6 py-3">Class</th>
+                                                <th className="px-6 py-3">Assessment</th>
+                                                <th className="px-6 py-3">Marks</th>
+                                                <th className="px-6 py-3">%</th>
+                                                <th className="px-6 py-3">Status</th>
+                                                <th className="px-6 py-3">Action</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-gray-100">
+                                            {filteredSubmissions.length === 0 ? (
+                                                <tr>
+                                                    <td colSpan="7" className="px-6 py-8 text-center text-gray-400">
+                                                        No matching submissions found.
+                                                    </td>
+                                                </tr>
+                                            ) : (
+                                                filteredSubmissions.map(sub => (
+                                                    <tr key={sub.id} className="hover:bg-gray-50 transition-colors">
+                                                        <td className="px-6 py-4 font-medium text-slate-800">{sub.studentName}</td>
+                                                        <td className="px-6 py-4">{sub.studentClass}</td>
+                                                        <td className="px-6 py-4">
+                                                            <div className="truncate max-w-[150px]" title={sub.assessmentName}>{sub.assessmentName}</div>
+                                                            <div className="text-xs text-gray-400">{new Date(sub.timestamp).toLocaleString()}</div>
+                                                        </td>
+                                                        <td className="px-6 py-4 font-semibold">{sub.marksAwarded} / {sub.maxMarks}</td>
+                                                        <td className="px-6 py-4">
+                                                            <div className="flex items-center gap-2">
+                                                                <div className="w-16 h-2 bg-gray-200 rounded-full overflow-hidden">
+                                                                    <div className={`h-full ${sub.percentage >= 80 ? 'bg-green-500' : sub.percentage >= 50 ? 'bg-yellow-500' : 'bg-red-500'}`} style={{width: `${sub.percentage}%`}}></div>
+                                                                </div>
+                                                                <span className="text-xs font-semibold w-8">{sub.percentage}%</span>
+                                                            </div>
+                                                        </td>
+                                                        <td className="px-6 py-4">
+                                                            <StatusBadge status={sub.status} />
+                                                        </td>
+                                                        <td className="px-6 py-4">
+                                                            <button 
+                                                                onClick={() => setSelectedSubmission(sub)}
+                                                                className="text-blue-600 hover:text-blue-800 font-medium text-xs px-3 py-1.5 border border-blue-200 rounded hover:bg-blue-50 transition-colors"
+                                                            >
+                                                                Review
+                                                            </button>
+                                                        </td>
+                                                    </tr>
+                                                ))
+                                            )}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+ 
+                    {selectedSubmission && (
+                        <ReviewModal 
+                            submission={selectedSubmission} 
+                            db={db}
+                            onClose={() => setSelectedSubmission(null)} 
+                        />
+                    )}
+                </div>
+            );
+        };
+ 
+        const StatCard = ({ icon, title, value, color, bg }) => (
+            <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100 flex items-center gap-4">
+                <div className={`w-12 h-12 rounded-full ${bg} ${color} flex items-center justify-center text-xl`}>
+                    <i className={`fa-solid ${icon}`}></i>
+                </div>
+                <div>
+                    <p className="text-xs text-gray-500 font-semibold uppercase tracking-wider">{title}</p>
+                    <p className="text-2xl font-bold text-slate-800">{value}</p>
+                </div>
+            </div>
+        );
+ 
+        const StatusBadge = ({ status }) => {
+            let colors = "bg-gray-100 text-gray-800";
+            if (status === 'AI Marked') colors = "bg-blue-100 text-blue-800 border-blue-200";
+            if (status === 'Pending Lecturer Review') colors = "bg-yellow-100 text-yellow-800 border-yellow-200";
+            if (status === 'Lecturer Verified') colors = "bg-green-100 text-green-800 border-green-200";
+ 
+            return <span className={`px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide rounded-full border ${colors}`}>{status}</span>;
+        };
+ 
+        // --- Add Assessment Form Component ---
+        const AddAssessmentForm = ({ db, onSuccess }) => {
+            const [formData, setFormData] = useState({ name: '', topic: '', maxMarks: 10, schemeText: '' });
+            const [schemeImage, setSchemeImage] = useState(null);
+            const [isSaving, setIsSaving] = useState(false);
+ 
+            const handleImageChange = async (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const base64 = await fileToBase64(file);
+                    setSchemeImage(base64);
+                }
+            };
+ 
+            const handleSave = async (e) => {
+                e.preventDefault();
+                setIsSaving(true);
+                try {
+                    const newAssessment = {
+                        id: generateId(),
+                        ...formData,
+                        maxMarks: parseInt(formData.maxMarks),
+                        schemeImage,
+                        createdAt: Date.now()
+                    };
+ 
+                    if (db && window.firebaseModules) {
+                        const { doc, setDoc } = window.firebaseModules;
+                        const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'assessments', newAssessment.id);
+                        await setDoc(docRef, newAssessment);
+                    } else {
+                        localAssessments.push(newAssessment);
+                    }
+                    onSuccess();
+                } catch (err) {
+                    console.error("Error saving scheme:", err);
+                    alert("Failed to save marking scheme.");
+                } finally {
+                    setIsSaving(false);
+                }
+            };
+ 
+            return (
+                <div className="max-w-2xl mx-auto bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+                    <h2 className="text-xl font-bold text-slate-800 mb-6">Add New Assessment & Marking Scheme</h2>
+                    <form onSubmit={handleSave} className="space-y-4">
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Assessment Name</label>
+                            <input 
+                                required type="text"
+                                value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})}
+                                placeholder="e.g. Test 1 Calculus"
+                                className="w-full px-4 py-2 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                            />
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Topic</label>
+                                <input 
+                                    required type="text"
+                                    value={formData.topic} onChange={e => setFormData({...formData, topic: e.target.value})}
+                                    placeholder="e.g. Integration"
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Maximum Marks</label>
+                                <input 
+                                    required type="number" min="1"
+                                    value={formData.maxMarks} onChange={e => setFormData({...formData, maxMarks: e.target.value})}
+                                    className="w-full px-4 py-2 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                                />
+                            </div>
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Marking Criteria / Steps (Optional Text Details)</label>
+                            <textarea 
+                                rows="3"
+                                value={formData.schemeText} onChange={e => setFormData({...formData, schemeText: e.target.value})}
+                                placeholder="e.g. Step 1: K1 for formula, J1 for answer..."
+                                className="w-full px-4 py-2 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                            ></textarea>
+                        </div>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Upload Marking Scheme Document/Image</label>
+                            <input 
+                                type="file" accept="image/*" onChange={handleImageChange}
+                                className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                            />
+                        </div>
+                        <div className="pt-4 flex justify-end">
+                            <button 
+                                type="submit" disabled={isSaving}
+                                className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors text-sm disabled:opacity-50"
+                            >
+                                {isSaving ? 'Saving...' : 'Save Marking Scheme'}
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            );
+        };
+ 
+        // --- Lecturer Review Modal Component ---
+        const ReviewModal = ({ submission, db, onClose }) => {
+            const [marks, setMarks] = useState(submission.marksAwarded);
+            const [feedback, setFeedback] = useState(submission.feedback || "");
+            const [isSaving, setIsSaving] = useState(false);
+ 
+            return (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 overflow-y-auto">
+                    <div className="bg-white rounded-2xl max-w-4xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden my-8">
+                        <div className="px-6 py-4 bg-gray-50 border-b border-gray-200 flex justify-between items-center">
+                            <div>
+                                <h3 className="text-lg font-bold text-slate-800">{submission.studentName} ({submission.studentClass})</h3>
+                                <p className="text-xs text-gray-500">{submission.assessmentName} • {new Date(submission.timestamp).toLocaleString()}</p>
+                            </div>
+                            <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1">
+                                <i className="fa-solid fa-xmark text-xl"></i>
+                            </button>
+                        </div>
+ 
+                        <div className="p-6 overflow-y-auto space-y-6">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div>
+                                    <h4 className="font-semibold text-sm text-gray-700 mb-2">Student Handwritten Solution</h4>
+                                    <div className="bg-gray-100 rounded-lg p-2 border border-gray-200">
+                                        <img src={submission.imageUrl} alt="Student solution" className="w-full h-auto object-contain max-h-[350px] rounded" />
+                                    </div>
+                                </div>
+ 
+                                <div>
+                                    <h4 className="font-semibold text-sm text-gray-700 mb-2">AI Step-by-Step Breakdown</h4>
+                                    <div className="space-y-2 max-h-[350px] overflow-y-auto pr-1">
+                                        {submission.stepBreakdown && submission.stepBreakdown.length > 0 ? (
+                                            submission.stepBreakdown.map((item, i) => (
+                                                <div key={i} className="p-3 bg-gray-50 rounded-lg border border-gray-200 text-xs space-y-1">
+                                                    <div className="flex justify-between font-semibold text-slate-800">
+                                                        <span>Step {i + 1}: {item.step}</span>
+                                                        <span className="text-blue-600 font-bold">+{item.marks}m</span>
+                                                    </div>
+                                                    <p className="text-gray-600">{item.comments}</p>
+                                                </div>
+                                            ))
+                                        ) : (
+                                            <p className="text-xs text-gray-400 italic">No step breakdown generated.</p>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+ 
+                            <div className="border-t border-gray-100 pt-4 space-y-4">
+                                <div>
+                                    <label className="block text-sm font-semibold text-gray-700 mb-1">Adjust Final Marks</label>
+                                    <div className="flex items-center gap-2">
+                                        <input 
+                                            type="number" min="0" max={submission.maxMarks}
+                                            value={marks}
+                                            onChange={e => setMarks(e.target.value)}
+                                            className="w-24 px-3 py-2 text-xl font-bold text-blue-600 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500"
+                                        />
+                                        <span className="text-gray-500 text-lg font-medium">/ {submission.maxMarks}</span>
+                                    </div>
+                                </div>
+ 
+                                <div>
+                                    <label className="block text-sm font-semibold text-gray-700 mb-1">Overall Feedback / Comments</label>
+                                    <textarea 
+                                        rows="4"
+                                        value={feedback}
+                                        onChange={e => setFeedback(e.target.value)}
+                                        className="w-full px-4 py-3 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 text-gray-700 text-sm leading-relaxed"
+                                    ></textarea>
+                                </div>
+ 
+                                <div className="pt-4 border-t border-gray-100 flex gap-3 justify-end">
+                                    <button onClick={onClose} className="px-5 py-2 text-gray-600 hover:bg-gray-100 rounded-lg font-medium transition-colors text-sm">
+                                        Cancel
+                                    </button>
+                                    <button 
+                                        onClick={async () => {
+                                            setIsSaving(true);
+                                            try {
+                                                const updated = {
+                                                    ...submission,
+                                                    marksAwarded: Number(marks),
+                                                    percentage: Math.round((Number(marks) / submission.maxMarks) * 100),
+                                                    feedback: feedback,
+                                                    status: 'Lecturer Verified'
+                                                };
+                                                if (db && window.firebaseModules) {
+                                                    const { doc, updateDoc } = window.firebaseModules;
+                                                    const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'submissions', submission.id);
+                                                    await updateDoc(docRef, {
+                                                        marksAwarded: updated.marksAwarded,
+                                                        percentage: updated.percentage,
+                                                        feedback: updated.feedback,
+                                                        status: updated.status
+                                                    });
+                                                } else {
+                                                    const idx = localSubmissions.findIndex(s => s.id === submission.id);
+                                                    if (idx !== -1) localSubmissions[idx] = updated;
+                                                }
+                                                onClose();
+                                            } catch (err) {
+                                                console.error("Verification failed:", err);
+                                            } finally {
+                                                setIsSaving(false);
+                                            }
+                                        }}
+                                        disabled={isSaving}
+                                        className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium transition-colors text-sm flex items-center gap-2 disabled:opacity-50"
+                                    >
+                                        {isSaving ? 'Saving...' : <><i className="fa-solid fa-check-double"></i> Verify & Save</>}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+ 
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
